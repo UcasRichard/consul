@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/armon/go-metrics"
-	"github.com/hashicorp/consul-migrate/migrator"
 	"github.com/hashicorp/consul/watch"
 	"github.com/hashicorp/go-checkpoint"
 	"github.com/hashicorp/go-syslog"
@@ -48,6 +47,7 @@ type Command struct {
 	httpServers       []*HTTPServer
 	dnsServer         *DNSServer
 	scadaProvider     *scada.Provider
+	scadaHttp         *HTTPServer
 }
 
 // readConfig is responsible for setup of our configuration using
@@ -80,12 +80,14 @@ func (c *Command) readConfig() *Config {
 
 	cmdFlags.StringVar(&cmdConfig.ClientAddr, "client", "", "address to bind client listeners to (DNS, HTTP, HTTPS, RPC)")
 	cmdFlags.StringVar(&cmdConfig.BindAddr, "bind", "", "address to bind server listeners to")
+	cmdFlags.IntVar(&cmdConfig.Ports.HTTP, "http-port", 0, "http port to use")
 	cmdFlags.StringVar(&cmdConfig.AdvertiseAddr, "advertise", "", "address to advertise instead of bind addr")
 	cmdFlags.StringVar(&cmdConfig.AdvertiseAddrWan, "advertise-wan", "", "address to advertise on wan instead of bind or advertise addr")
 
 	cmdFlags.StringVar(&cmdConfig.AtlasInfrastructure, "atlas", "", "infrastructure name in Atlas")
 	cmdFlags.StringVar(&cmdConfig.AtlasToken, "atlas-token", "", "authentication token for Atlas")
 	cmdFlags.BoolVar(&cmdConfig.AtlasJoin, "atlas-join", false, "auto-join with Atlas")
+	cmdFlags.StringVar(&cmdConfig.AtlasEndpoint, "atlas-endpoint", "", "endpoint for Atlas integration")
 
 	cmdFlags.IntVar(&cmdConfig.Protocol, "protocol", -1, "protocol version")
 
@@ -160,6 +162,19 @@ func (c *Command) readConfig() *Config {
 	if config.DataDir == "" {
 		c.Ui.Error("Must specify data directory using -data-dir")
 		return nil
+	}
+
+	// Check the data dir for signs of an un-migrated Consul 0.5.x or older
+	// server. Consul refuses to start if this is present to protect a server
+	// with existing data from starting on a fresh data set.
+	if config.Server {
+		mdbPath := filepath.Join(config.DataDir, "mdb")
+		if _, err := os.Stat(mdbPath); !os.IsNotExist(err) {
+			c.Ui.Error(fmt.Sprintf("CRITICAL: Deprecated data folder found at %q!", mdbPath))
+			c.Ui.Error("Consul will refuse to boot with this directory present.")
+			c.Ui.Error("See https://consul.io/docs/upgrade-specific.html for more information.")
+			return nil
+		}
 	}
 
 	if config.EncryptKey != "" {
@@ -345,20 +360,14 @@ func (c *Command) setupAgent(config *Config, logOutput io.Writer, logWriter *log
 	c.rpcServer = NewAgentRPC(agent, rpcListener, logOutput, logWriter)
 
 	// Enable the SCADA integration
-	var scadaList net.Listener
-	if config.AtlasInfrastructure != "" {
-		provider, list, err := NewProvider(config, logOutput)
-		if err != nil {
-			agent.Shutdown()
-			c.Ui.Error(fmt.Sprintf("Error starting SCADA connection: %s", err))
-			return err
-		}
-		c.scadaProvider = provider
-		scadaList = list
+	if err := c.setupScadaConn(config); err != nil {
+		agent.Shutdown()
+		c.Ui.Error(fmt.Sprintf("Error starting SCADA connection: %s", err))
+		return err
 	}
 
-	if config.Ports.HTTP > 0 || config.Ports.HTTPS > 0 || scadaList != nil {
-		servers, err := NewHTTPServers(agent, config, scadaList, logOutput)
+	if config.Ports.HTTP > 0 || config.Ports.HTTPS > 0 {
+		servers, err := NewHTTPServers(agent, config, logOutput)
 		if err != nil {
 			agent.Shutdown()
 			c.Ui.Error(fmt.Sprintf("Error starting http servers: %s", err))
@@ -604,72 +613,6 @@ func (c *Command) Run(args []string) int {
 		metrics.NewGlobal(metricsConf, inm)
 	}
 
-	// If we are starting a consul 0.5.1+ server for the first time,
-	// and we have data from a previous Consul version, attempt to
-	// migrate the data from LMDB to BoltDB using the migrator utility.
-	if config.Server {
-		// If the data dir doesn't exist yet (first start), then don't
-		// attempt to migrate.
-		if _, err := os.Stat(config.DataDir); os.IsNotExist(err) {
-			goto AFTER_MIGRATE
-		}
-
-		m, err := migrator.New(config.DataDir)
-		if err != nil {
-			c.Ui.Error(err.Error())
-			return 1
-		}
-
-		// Handle progress info from the migrator utility. This will
-		// just dump out the current operation and progress every ~5
-		// percent progress.
-		doneCh := make(chan struct{})
-		go func() {
-			var lastOp string
-			var lastProgress float64
-			lastFlush := time.Now()
-			for {
-				select {
-				case update := <-m.ProgressCh:
-					switch {
-					case lastOp != update.Op:
-						lastProgress = update.Progress
-						lastOp = update.Op
-						c.Ui.Output(update.Op)
-						c.Ui.Info(fmt.Sprintf("%.2f%%", update.Progress))
-
-					case update.Progress-lastProgress >= 5:
-						fallthrough
-
-					case time.Now().Sub(lastFlush) > time.Second:
-						fallthrough
-
-					case update.Progress == 100:
-						lastFlush = time.Now()
-						lastProgress = update.Progress
-						c.Ui.Info(fmt.Sprintf("%.2f%%", update.Progress))
-					}
-				case <-doneCh:
-					return
-				}
-			}
-		}()
-
-		c.Ui.Output("Starting raft data migration...")
-		start := time.Now()
-		migrated, err := m.Migrate()
-		close(doneCh)
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf("Failed to migrate raft data: %s", err))
-			return 1
-		}
-		if migrated {
-			duration := time.Now().Sub(start)
-			c.Ui.Output(fmt.Sprintf("Successfully migrated raft data in %s", duration))
-		}
-	}
-
-AFTER_MIGRATE:
 	// Create the agent
 	if err := c.setupAgent(config, logOutput, logWriter); err != nil {
 		return 1
@@ -684,9 +627,16 @@ AFTER_MIGRATE:
 	for _, server := range c.httpServers {
 		defer server.Shutdown()
 	}
-	if c.scadaProvider != nil {
-		defer c.scadaProvider.Shutdown()
-	}
+
+	// Check and shut down the SCADA listeners at the end
+	defer func() {
+		if c.scadaHttp != nil {
+			c.scadaHttp.Shutdown()
+		}
+		if c.scadaProvider != nil {
+			c.scadaProvider.Shutdown()
+		}
+	}()
 
 	// Join startup nodes if specified
 	if err := c.startupJoin(config); err != nil {
@@ -904,7 +854,44 @@ func (c *Command) handleReload(config *Config) *Config {
 		}(wp)
 	}
 
+	// Reload SCADA client if we have a change
+	if newConf.AtlasInfrastructure != config.AtlasInfrastructure ||
+		newConf.AtlasToken != config.AtlasToken ||
+		newConf.AtlasEndpoint != config.AtlasEndpoint {
+		if err := c.setupScadaConn(newConf); err != nil {
+			c.Ui.Error(fmt.Sprintf("Failed reloading SCADA client: %s", err))
+			return nil
+		}
+	}
+
 	return newConf
+}
+
+// startScadaClient is used to start a new SCADA provider and listener,
+// replacing any existing listeners.
+func (c *Command) setupScadaConn(config *Config) error {
+	// Shut down existing SCADA listeners
+	if c.scadaProvider != nil {
+		c.scadaProvider.Shutdown()
+	}
+	if c.scadaHttp != nil {
+		c.scadaHttp.Shutdown()
+	}
+
+	// No-op if we don't have an infrastructure
+	if config.AtlasInfrastructure == "" {
+		return nil
+	}
+
+	// Create the new provider and listener
+	c.Ui.Output("Connecting to Atlas: " + config.AtlasInfrastructure)
+	provider, list, err := NewProvider(config, c.logOutput)
+	if err != nil {
+		return err
+	}
+	c.scadaProvider = provider
+	c.scadaHttp = newScadaHttp(c.agent, list)
+	return nil
 }
 
 func (c *Command) Synopsis() string {
@@ -924,8 +911,10 @@ Options:
   -atlas=org/name          Sets the Atlas infrastructure name, enables SCADA.
   -atlas-join              Enables auto-joining the Atlas cluster
   -atlas-token=token       Provides the Atlas API token
+  -atlas-endpoint=1.2.3.4  The address of the endpoint for Atlas integration.
   -bootstrap               Sets server to bootstrap mode
   -bind=0.0.0.0            Sets the bind address for cluster communication
+  -http-port=8500          Sets the HTTP API port to listen on
   -bootstrap-expect=0      Sets server to expect bootstrap mode.
   -client=127.0.0.1        Sets the address to bind for client access.
                            This includes RPC, DNS, HTTP and HTTPS (if configured)

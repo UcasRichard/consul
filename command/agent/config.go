@@ -26,7 +26,7 @@ type PortConfig struct {
 	HTTPS   int // HTTPS API
 	RPC     int // CLI RPC
 	SerfLan int `mapstructure:"serf_lan"` // LAN gossip (Client + Server)
-	SerfWan int `mapstructure:"serf_wan"` // WAN gossip (Server onlyg)
+	SerfWan int `mapstructure:"serf_wan"` // WAN gossip (Server only)
 	Server  int // Server internal RPC
 }
 
@@ -99,7 +99,7 @@ type Config struct {
 	Bootstrap bool `mapstructure:"bootstrap"`
 
 	// BootstrapExpect tries to automatically bootstrap the Consul cluster,
-	// by witholding peers until enough servers join.
+	// by withholding peers until enough servers join.
 	BootstrapExpect int `mapstructure:"bootstrap_expect"`
 
 	// Server controls if this agent acts like a Consul server,
@@ -221,7 +221,7 @@ type Config struct {
 	KeyFile string `mapstructure:"key_file"`
 
 	// ServerName is used with the TLS certificates to ensure the name we
-	// provid ematches the certificate
+	// provide matches the certificate
 	ServerName string `mapstructure:"server_name"`
 
 	// StartJoin is a list of addresses to attempt to join when the
@@ -362,6 +362,10 @@ type Config struct {
 	// AtlasJoin controls if Atlas will attempt to auto-join the node
 	// to it's cluster. Requires Atlas integration.
 	AtlasJoin bool `mapstructure:"atlas_join"`
+
+	// AtlasEndpoint is the SCADA endpoint used for Atlas integration. If
+	// empty, the defaults from the provider are used.
+	AtlasEndpoint string `mapstructure:"atlas_endpoint"`
 
 	// AEInterval controls the anti-entropy interval. This is how often
 	// the agent attempts to reconcile it's local state with the server'
@@ -1055,6 +1059,9 @@ func MergeConfig(a, b *Config) *Config {
 	}
 	if b.AtlasJoin {
 		result.AtlasJoin = true
+	}
+	if b.AtlasEndpoint != "" {
+		result.AtlasEndpoint = b.AtlasEndpoint
 	}
 	if b.SessionTTLMinRaw != "" {
 		result.SessionTTLMin = b.SessionTTLMin

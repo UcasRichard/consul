@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/consul/acl"
+	"github.com/hashicorp/consul/consul/state"
 	"github.com/hashicorp/consul/tlsutil"
 	"github.com/hashicorp/raft"
 	"github.com/hashicorp/raft-boltdb"
@@ -26,26 +27,25 @@ import (
 // protocol versions.
 const (
 	ProtocolVersionMin uint8 = 1
-	ProtocolVersionMax       = 3
+	ProtocolVersionMax       = 2
 )
 
 const (
 	serfLANSnapshot   = "serf/local.snapshot"
 	serfWANSnapshot   = "serf/remote.snapshot"
 	raftState         = "raft/"
-	tmpStatePath      = "tmp/"
 	snapshotsRetained = 2
 
 	// serverRPCCache controls how long we keep an idle connection
 	// open to a server
 	serverRPCCache = 2 * time.Minute
 
-	// serverMaxStreams controsl how many idle streams we keep
+	// serverMaxStreams controls how many idle streams we keep
 	// open to a server
 	serverMaxStreams = 64
 
 	// raftLogCacheSize is the maximum number of logs to cache in-memory.
-	// This is used to reduce disk I/O for the recently commited entries.
+	// This is used to reduce disk I/O for the recently committed entries.
 	raftLogCacheSize = 512
 
 	// raftRemoveGracePeriod is how long we wait to allow a RemovePeer
@@ -129,13 +129,13 @@ type Server struct {
 
 	// sessionTimers track the expiration time of each Session that has
 	// a TTL. On expiration, a SessionDestroy event will occur, and
-	// destroy the session via standard session destory processing
+	// destroy the session via standard session destroy processing
 	sessionTimers     map[string]*time.Timer
 	sessionTimersLock sync.Mutex
 
 	// tombstoneGC is used to track the pending GC invocations
 	// for the KV tombstones
-	tombstoneGC *TombstoneGC
+	tombstoneGC *state.TombstoneGC
 
 	shutdown     bool
 	shutdownCh   chan struct{}
@@ -193,7 +193,7 @@ func NewServer(config *Config) (*Server, error) {
 	logger := log.New(config.LogOutput, "", log.LstdFlags)
 
 	// Create the tombstone GC
-	gc, err := NewTombstoneGC(config.TombstoneTTL, config.TombstoneTTLGranularity)
+	gc, err := state.NewTombstoneGC(config.TombstoneTTL, config.TombstoneTTLGranularity)
 	if err != nil {
 		return nil, err
 	}
@@ -316,18 +316,9 @@ func (s *Server) setupRaft() error {
 		s.config.RaftConfig.EnableSingleNode = true
 	}
 
-	// Create the base state path
-	statePath := filepath.Join(s.config.DataDir, tmpStatePath)
-	if err := os.RemoveAll(statePath); err != nil {
-		return err
-	}
-	if err := ensurePath(statePath, true); err != nil {
-		return err
-	}
-
 	// Create the FSM
 	var err error
-	s.fsm, err = NewFSM(s.tombstoneGC, statePath, s.config.LogOutput)
+	s.fsm, err = NewFSM(s.tombstoneGC, s.config.LogOutput)
 	if err != nil {
 		return err
 	}
@@ -490,11 +481,6 @@ func (s *Server) Shutdown() error {
 	// Close the connection pool
 	s.connPool.Shutdown()
 
-	// Close the fsm
-	if s.fsm != nil {
-		s.fsm.Close()
-	}
-
 	return nil
 }
 
@@ -566,7 +552,7 @@ func (s *Server) Leave() error {
 }
 
 // numOtherPeers is used to check on the number of known peers
-// excluding the local ndoe
+// excluding the local node
 func (s *Server) numOtherPeers() (int, error) {
 	peers, err := s.raftPeers.Peers()
 	if err != nil {

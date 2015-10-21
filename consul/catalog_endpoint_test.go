@@ -11,14 +11,15 @@ import (
 
 	"github.com/hashicorp/consul/consul/structs"
 	"github.com/hashicorp/consul/testutil"
+	"github.com/hashicorp/net-rpc-msgpackrpc"
 )
 
 func TestCatalogRegister(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	arg := structs.RegisterRequest{
 		Datacenter: "dc1",
@@ -32,13 +33,13 @@ func TestCatalogRegister(t *testing.T) {
 	}
 	var out struct{}
 
-	err := client.Call("Catalog.Register", &arg, &out)
+	err := msgpackrpc.CallWithCodec(codec, "Catalog.Register", &arg, &out)
 	if err == nil || err.Error() != "No cluster leader" {
 		t.Fatalf("err: %v", err)
 	}
 
 	testutil.WaitForResult(func() (bool, error) {
-		err := client.Call("Catalog.Register", &arg, &out)
+		err := msgpackrpc.CallWithCodec(codec, "Catalog.Register", &arg, &out)
 		return err == nil, err
 	}, func(err error) {
 		t.Fatalf("err: %v", err)
@@ -53,10 +54,10 @@ func TestCatalogRegister_ACLDeny(t *testing.T) {
 	})
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
 
 	// Create the ACL
 	arg := structs.ACLRequest{
@@ -70,7 +71,7 @@ func TestCatalogRegister_ACLDeny(t *testing.T) {
 		WriteRequest: structs.WriteRequest{Token: "root"},
 	}
 	var out string
-	if err := client.Call("ACL.Apply", &arg, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "ACL.Apply", &arg, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	id := out
@@ -88,13 +89,13 @@ func TestCatalogRegister_ACLDeny(t *testing.T) {
 	}
 	var outR struct{}
 
-	err := client.Call("Catalog.Register", &argR, &outR)
+	err := msgpackrpc.CallWithCodec(codec, "Catalog.Register", &argR, &outR)
 	if err == nil || !strings.Contains(err.Error(), permissionDenied) {
 		t.Fatalf("err: %v", err)
 	}
 
 	argR.Service.Service = "foo"
-	err = client.Call("Catalog.Register", &argR, &outR)
+	err = msgpackrpc.CallWithCodec(codec, "Catalog.Register", &argR, &outR)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -104,14 +105,14 @@ func TestCatalogRegister_ForwardLeader(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client1 := rpcClient(t, s1)
-	defer client1.Close()
+	codec1 := rpcClient(t, s1)
+	defer codec1.Close()
 
 	dir2, s2 := testServer(t)
 	defer os.RemoveAll(dir2)
 	defer s2.Shutdown()
-	client2 := rpcClient(t, s2)
-	defer client2.Close()
+	codec2 := rpcClient(t, s2)
+	defer codec2.Close()
 
 	// Try to join
 	addr := fmt.Sprintf("127.0.0.1:%d",
@@ -120,15 +121,15 @@ func TestCatalogRegister_ForwardLeader(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client1.Call, "dc1")
-	testutil.WaitForLeader(t, client2.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
+	testutil.WaitForLeader(t, s2.RPC, "dc1")
 
 	// Use the follower as the client
-	var client *rpc.Client
+	var codec rpc.ClientCodec
 	if !s1.IsLeader() {
-		client = client1
+		codec = codec1
 	} else {
-		client = client2
+		codec = codec2
 	}
 
 	arg := structs.RegisterRequest{
@@ -142,7 +143,7 @@ func TestCatalogRegister_ForwardLeader(t *testing.T) {
 		},
 	}
 	var out struct{}
-	if err := client.Call("Catalog.Register", &arg, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.Register", &arg, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 }
@@ -151,8 +152,8 @@ func TestCatalogRegister_ForwardDC(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	dir2, s2 := testServerDC(t, "dc2")
 	defer os.RemoveAll(dir2)
@@ -165,10 +166,10 @@ func TestCatalogRegister_ForwardDC(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client.Call, "dc2")
+	testutil.WaitForLeader(t, s1.RPC, "dc2")
 
 	arg := structs.RegisterRequest{
-		Datacenter: "dc2", // SHould forward through s1
+		Datacenter: "dc2", // Should forward through s1
 		Node:       "foo",
 		Address:    "127.0.0.1",
 		Service: &structs.NodeService{
@@ -178,7 +179,7 @@ func TestCatalogRegister_ForwardDC(t *testing.T) {
 		},
 	}
 	var out struct{}
-	if err := client.Call("Catalog.Register", &arg, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.Register", &arg, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 }
@@ -187,8 +188,8 @@ func TestCatalogDeregister(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	arg := structs.DeregisterRequest{
 		Datacenter: "dc1",
@@ -196,14 +197,14 @@ func TestCatalogDeregister(t *testing.T) {
 	}
 	var out struct{}
 
-	err := client.Call("Catalog.Deregister", &arg, &out)
+	err := msgpackrpc.CallWithCodec(codec, "Catalog.Deregister", &arg, &out)
 	if err == nil || err.Error() != "No cluster leader" {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
 
-	if err := client.Call("Catalog.Deregister", &arg, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.Deregister", &arg, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 }
@@ -212,8 +213,8 @@ func TestCatalogListDatacenters(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	dir2, s2 := testServerDC(t, "dc2")
 	defer os.RemoveAll(dir2)
@@ -226,10 +227,10 @@ func TestCatalogListDatacenters(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
 
 	var out []string
-	if err := client.Call("Catalog.ListDatacenters", struct{}{}, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListDatacenters", struct{}{}, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -251,25 +252,27 @@ func TestCatalogListNodes(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	args := structs.DCSpecificRequest{
 		Datacenter: "dc1",
 	}
 	var out structs.IndexedNodes
-	err := client.Call("Catalog.ListNodes", &args, &out)
+	err := msgpackrpc.CallWithCodec(codec, "Catalog.ListNodes", &args, &out)
 	if err == nil || err.Error() != "No cluster leader" {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
 
 	// Just add a node
-	s1.fsm.State().EnsureNode(1, structs.Node{"foo", "127.0.0.1"})
+	if err := s1.fsm.State().EnsureNode(1, &structs.Node{Node: "foo", Address: "127.0.0.1"}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
 
 	testutil.WaitForResult(func() (bool, error) {
-		client.Call("Catalog.ListNodes", &args, &out)
+		msgpackrpc.CallWithCodec(codec, "Catalog.ListNodes", &args, &out)
 		return len(out.Nodes) == 2, nil
 	}, func(err error) {
 		t.Fatalf("err: %v", err)
@@ -291,14 +294,14 @@ func TestCatalogListNodes_StaleRaad(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client1 := rpcClient(t, s1)
-	defer client1.Close()
+	codec1 := rpcClient(t, s1)
+	defer codec1.Close()
 
 	dir2, s2 := testServerDCBootstrap(t, "dc1", false)
 	defer os.RemoveAll(dir2)
 	defer s2.Shutdown()
-	client2 := rpcClient(t, s2)
-	defer client2.Close()
+	codec2 := rpcClient(t, s2)
+	defer codec2.Close()
 
 	// Try to join
 	addr := fmt.Sprintf("127.0.0.1:%d",
@@ -307,21 +310,25 @@ func TestCatalogListNodes_StaleRaad(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client1.Call, "dc1")
-	testutil.WaitForLeader(t, client2.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
+	testutil.WaitForLeader(t, s2.RPC, "dc1")
 
 	// Use the follower as the client
-	var client *rpc.Client
+	var codec rpc.ClientCodec
 	if !s1.IsLeader() {
-		client = client1
+		codec = codec1
 
 		// Inject fake data on the follower!
-		s1.fsm.State().EnsureNode(1, structs.Node{"foo", "127.0.0.1"})
+		if err := s1.fsm.State().EnsureNode(1, &structs.Node{Node: "foo", Address: "127.0.0.1"}); err != nil {
+			t.Fatalf("err: %v", err)
+		}
 	} else {
-		client = client2
+		codec = codec2
 
 		// Inject fake data on the follower!
-		s2.fsm.State().EnsureNode(1, structs.Node{"foo", "127.0.0.1"})
+		if err := s2.fsm.State().EnsureNode(1, &structs.Node{Node: "foo", Address: "127.0.0.1"}); err != nil {
+			t.Fatalf("err: %v", err)
+		}
 	}
 
 	args := structs.DCSpecificRequest{
@@ -329,7 +336,7 @@ func TestCatalogListNodes_StaleRaad(t *testing.T) {
 		QueryOptions: structs.QueryOptions{AllowStale: true},
 	}
 	var out structs.IndexedNodes
-	if err := client.Call("Catalog.ListNodes", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListNodes", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -355,14 +362,14 @@ func TestCatalogListNodes_ConsistentRead_Fail(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client1 := rpcClient(t, s1)
-	defer client1.Close()
+	codec1 := rpcClient(t, s1)
+	defer codec1.Close()
 
 	dir2, s2 := testServerDCBootstrap(t, "dc1", false)
 	defer os.RemoveAll(dir2)
 	defer s2.Shutdown()
-	client2 := rpcClient(t, s2)
-	defer client2.Close()
+	codec2 := rpcClient(t, s2)
+	defer codec2.Close()
 
 	// Try to join
 	addr := fmt.Sprintf("127.0.0.1:%d",
@@ -371,16 +378,16 @@ func TestCatalogListNodes_ConsistentRead_Fail(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client1.Call, "dc1")
-	testutil.WaitForLeader(t, client2.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
+	testutil.WaitForLeader(t, s2.RPC, "dc1")
 
 	// Use the leader as the client, kill the follower
-	var client *rpc.Client
+	var codec rpc.ClientCodec
 	if s1.IsLeader() {
-		client = client1
+		codec = codec1
 		s2.Shutdown()
 	} else {
-		client = client2
+		codec = codec2
 		s1.Shutdown()
 	}
 
@@ -389,7 +396,7 @@ func TestCatalogListNodes_ConsistentRead_Fail(t *testing.T) {
 		QueryOptions: structs.QueryOptions{RequireConsistent: true},
 	}
 	var out structs.IndexedNodes
-	if err := client.Call("Catalog.ListNodes", &args, &out); !strings.HasPrefix(err.Error(), "leadership lost") {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListNodes", &args, &out); !strings.HasPrefix(err.Error(), "leadership lost") {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -405,14 +412,14 @@ func TestCatalogListNodes_ConsistentRead(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client1 := rpcClient(t, s1)
-	defer client1.Close()
+	codec1 := rpcClient(t, s1)
+	defer codec1.Close()
 
 	dir2, s2 := testServerDCBootstrap(t, "dc1", false)
 	defer os.RemoveAll(dir2)
 	defer s2.Shutdown()
-	client2 := rpcClient(t, s2)
-	defer client2.Close()
+	codec2 := rpcClient(t, s2)
+	defer codec2.Close()
 
 	// Try to join
 	addr := fmt.Sprintf("127.0.0.1:%d",
@@ -421,15 +428,15 @@ func TestCatalogListNodes_ConsistentRead(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client1.Call, "dc1")
-	testutil.WaitForLeader(t, client2.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
+	testutil.WaitForLeader(t, s2.RPC, "dc1")
 
 	// Use the leader as the client, kill the follower
-	var client *rpc.Client
+	var codec rpc.ClientCodec
 	if s1.IsLeader() {
-		client = client1
+		codec = codec1
 	} else {
-		client = client2
+		codec = codec2
 	}
 
 	args := structs.DCSpecificRequest{
@@ -437,7 +444,7 @@ func TestCatalogListNodes_ConsistentRead(t *testing.T) {
 		QueryOptions: structs.QueryOptions{RequireConsistent: true},
 	}
 	var out structs.IndexedNodes
-	if err := client.Call("Catalog.ListNodes", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListNodes", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -453,18 +460,20 @@ func BenchmarkCatalogListNodes(t *testing.B) {
 	dir1, s1 := testServer(nil)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(nil, s1)
-	defer client.Close()
+	codec := rpcClient(nil, s1)
+	defer codec.Close()
 
 	// Just add a node
-	s1.fsm.State().EnsureNode(1, structs.Node{"foo", "127.0.0.1"})
+	if err := s1.fsm.State().EnsureNode(1, &structs.Node{Node: "foo", Address: "127.0.0.1"}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
 
 	args := structs.DCSpecificRequest{
 		Datacenter: "dc1",
 	}
 	for i := 0; i < t.N; i++ {
 		var out structs.IndexedNodes
-		if err := client.Call("Catalog.ListNodes", &args, &out); err != nil {
+		if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListNodes", &args, &out); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 	}
@@ -474,25 +483,29 @@ func TestCatalogListServices(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	args := structs.DCSpecificRequest{
 		Datacenter: "dc1",
 	}
 	var out structs.IndexedServices
-	err := client.Call("Catalog.ListServices", &args, &out)
+	err := msgpackrpc.CallWithCodec(codec, "Catalog.ListServices", &args, &out)
 	if err == nil || err.Error() != "No cluster leader" {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
 
 	// Just add a node
-	s1.fsm.State().EnsureNode(1, structs.Node{"foo", "127.0.0.1"})
-	s1.fsm.State().EnsureService(2, "foo", &structs.NodeService{"db", "db", []string{"primary"}, "127.0.0.1", 5000})
+	if err := s1.fsm.State().EnsureNode(1, &structs.Node{Node: "foo", Address: "127.0.0.1"}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if err := s1.fsm.State().EnsureService(2, "foo", &structs.NodeService{ID: "db", Service: "db", Tags: []string{"primary"}, Address: "127.0.0.1", Port: 5000}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
 
-	if err := client.Call("Catalog.ListServices", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListServices", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -520,18 +533,18 @@ func TestCatalogListServices_Blocking(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	args := structs.DCSpecificRequest{
 		Datacenter: "dc1",
 	}
 	var out structs.IndexedServices
 
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
 
 	// Run the query
-	if err := client.Call("Catalog.ListServices", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListServices", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -540,16 +553,21 @@ func TestCatalogListServices_Blocking(t *testing.T) {
 	args.MaxQueryTime = time.Second
 
 	// Async cause a change
+	idx := out.Index
 	start := time.Now()
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		s1.fsm.State().EnsureNode(1, structs.Node{"foo", "127.0.0.1"})
-		s1.fsm.State().EnsureService(2, "foo", &structs.NodeService{"db", "db", []string{"primary"}, "127.0.0.1", 5000})
+		if err := s1.fsm.State().EnsureNode(idx+1, &structs.Node{Node: "foo", Address: "127.0.0.1"}); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if err := s1.fsm.State().EnsureService(idx+2, "foo", &structs.NodeService{ID: "db", Service: "db", Tags: []string{"primary"}, Address: "127.0.0.1", Port: 5000}); err != nil {
+			t.Fatalf("err: %v", err)
+		}
 	}()
 
 	// Re-run the query
 	out = structs.IndexedServices{}
-	if err := client.Call("Catalog.ListServices", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListServices", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -559,7 +577,7 @@ func TestCatalogListServices_Blocking(t *testing.T) {
 	}
 
 	// Check the indexes
-	if out.Index != 2 {
+	if out.Index != idx+2 {
 		t.Fatalf("bad: %v", out)
 	}
 
@@ -573,18 +591,18 @@ func TestCatalogListServices_Timeout(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	args := structs.DCSpecificRequest{
 		Datacenter: "dc1",
 	}
 	var out structs.IndexedServices
 
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
 
 	// Run the query
-	if err := client.Call("Catalog.ListServices", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListServices", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -595,7 +613,7 @@ func TestCatalogListServices_Timeout(t *testing.T) {
 	// Re-run the query
 	start := time.Now()
 	out = structs.IndexedServices{}
-	if err := client.Call("Catalog.ListServices", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListServices", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -614,8 +632,8 @@ func TestCatalogListServices_Stale(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	args := structs.DCSpecificRequest{
 		Datacenter: "dc1",
@@ -624,11 +642,15 @@ func TestCatalogListServices_Stale(t *testing.T) {
 	var out structs.IndexedServices
 
 	// Inject a fake service
-	s1.fsm.State().EnsureNode(1, structs.Node{"foo", "127.0.0.1"})
-	s1.fsm.State().EnsureService(2, "foo", &structs.NodeService{"db", "db", []string{"primary"}, "127.0.0.1", 5000})
+	if err := s1.fsm.State().EnsureNode(1, &structs.Node{Node: "foo", Address: "127.0.0.1"}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if err := s1.fsm.State().EnsureService(2, "foo", &structs.NodeService{ID: "db", Service: "db", Tags: []string{"primary"}, Address: "127.0.0.1", Port: 5000}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
 
 	// Run the query, do not wait for leader!
-	if err := client.Call("Catalog.ListServices", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListServices", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -647,8 +669,8 @@ func TestCatalogListServiceNodes(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	args := structs.ServiceSpecificRequest{
 		Datacenter:  "dc1",
@@ -657,18 +679,22 @@ func TestCatalogListServiceNodes(t *testing.T) {
 		TagFilter:   false,
 	}
 	var out structs.IndexedServiceNodes
-	err := client.Call("Catalog.ServiceNodes", &args, &out)
+	err := msgpackrpc.CallWithCodec(codec, "Catalog.ServiceNodes", &args, &out)
 	if err == nil || err.Error() != "No cluster leader" {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
 
 	// Just add a node
-	s1.fsm.State().EnsureNode(1, structs.Node{"foo", "127.0.0.1"})
-	s1.fsm.State().EnsureService(2, "foo", &structs.NodeService{"db", "db", []string{"primary"}, "127.0.0.1", 5000})
+	if err := s1.fsm.State().EnsureNode(1, &structs.Node{Node: "foo", Address: "127.0.0.1"}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if err := s1.fsm.State().EnsureService(2, "foo", &structs.NodeService{ID: "db", Service: "db", Tags: []string{"primary"}, Address: "127.0.0.1", Port: 5000}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
 
-	if err := client.Call("Catalog.ServiceNodes", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ServiceNodes", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -680,7 +706,7 @@ func TestCatalogListServiceNodes(t *testing.T) {
 	args.TagFilter = true
 	out = structs.IndexedServiceNodes{}
 
-	if err := client.Call("Catalog.ServiceNodes", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ServiceNodes", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if len(out.ServiceNodes) != 0 {
@@ -692,27 +718,33 @@ func TestCatalogNodeServices(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	args := structs.NodeSpecificRequest{
 		Datacenter: "dc1",
 		Node:       "foo",
 	}
 	var out structs.IndexedNodeServices
-	err := client.Call("Catalog.NodeServices", &args, &out)
+	err := msgpackrpc.CallWithCodec(codec, "Catalog.NodeServices", &args, &out)
 	if err == nil || err.Error() != "No cluster leader" {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
 
 	// Just add a node
-	s1.fsm.State().EnsureNode(1, structs.Node{"foo", "127.0.0.1"})
-	s1.fsm.State().EnsureService(2, "foo", &structs.NodeService{"db", "db", []string{"primary"}, "127.0.0.1", 5000})
-	s1.fsm.State().EnsureService(3, "foo", &structs.NodeService{"web", "web", nil, "127.0.0.1", 80})
+	if err := s1.fsm.State().EnsureNode(1, &structs.Node{Node: "foo", Address: "127.0.0.1"}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if err := s1.fsm.State().EnsureService(2, "foo", &structs.NodeService{ID: "db", Service: "db", Tags: []string{"primary"}, Address: "127.0.0.1", Port: 5000}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if err := s1.fsm.State().EnsureService(3, "foo", &structs.NodeService{ID: "web", Service: "web", Tags: nil, Address: "127.0.0.1", Port: 80}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
 
-	if err := client.Call("Catalog.NodeServices", &args, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.NodeServices", &args, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -736,8 +768,8 @@ func TestCatalogRegister_FailedCase1(t *testing.T) {
 	dir1, s1 := testServer(t)
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
-	client := rpcClient(t, s1)
-	defer client.Close()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
 
 	arg := structs.RegisterRequest{
 		Datacenter: "dc1",
@@ -751,14 +783,14 @@ func TestCatalogRegister_FailedCase1(t *testing.T) {
 	}
 	var out struct{}
 
-	err := client.Call("Catalog.Register", &arg, &out)
+	err := msgpackrpc.CallWithCodec(codec, "Catalog.Register", &arg, &out)
 	if err == nil || err.Error() != "No cluster leader" {
 		t.Fatalf("err: %v", err)
 	}
 
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	testutil.WaitForLeader(t, s1.RPC, "dc1")
 
-	if err := client.Call("Catalog.Register", &arg, &out); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.Register", &arg, &out); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -768,7 +800,7 @@ func TestCatalogRegister_FailedCase1(t *testing.T) {
 		ServiceName: "web",
 	}
 	var out2 structs.IndexedServiceNodes
-	if err := client.Call("Catalog.ServiceNodes", query, &out2); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ServiceNodes", query, &out2); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -778,15 +810,15 @@ func TestCatalogRegister_FailedCase1(t *testing.T) {
 	}
 }
 
-func testACLFilterServer(t *testing.T) (dir, token string, srv *Server, client *rpc.Client) {
+func testACLFilterServer(t *testing.T) (dir, token string, srv *Server, codec rpc.ClientCodec) {
 	dir, srv = testServerWithConfig(t, func(c *Config) {
 		c.ACLDatacenter = "dc1"
 		c.ACLMasterToken = "root"
 		c.ACLDefaultPolicy = "deny"
 	})
 
-	client = rpcClient(t, srv)
-	testutil.WaitForLeader(t, client.Call, "dc1")
+	codec = rpcClient(t, srv)
+	testutil.WaitForLeader(t, srv.RPC, "dc1")
 
 	// Create a new token
 	arg := structs.ACLRequest{
@@ -799,7 +831,7 @@ func testACLFilterServer(t *testing.T) (dir, token string, srv *Server, client *
 		},
 		WriteRequest: structs.WriteRequest{Token: "root"},
 	}
-	if err := client.Call("ACL.Apply", &arg, &token); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "ACL.Apply", &arg, &token); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -820,7 +852,7 @@ func testACLFilterServer(t *testing.T) (dir, token string, srv *Server, client *
 		},
 		WriteRequest: structs.WriteRequest{Token: "root"},
 	}
-	if err := client.Call("Catalog.Register", &regArg, nil); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.Register", &regArg, nil); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
@@ -840,24 +872,24 @@ func testACLFilterServer(t *testing.T) (dir, token string, srv *Server, client *
 		},
 		WriteRequest: structs.WriteRequest{Token: "root"},
 	}
-	if err := client.Call("Catalog.Register", &regArg, nil); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.Register", &regArg, nil); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 	return
 }
 
 func TestCatalog_ListServices_FilterACL(t *testing.T) {
-	dir, token, srv, client := testACLFilterServer(t)
+	dir, token, srv, codec := testACLFilterServer(t)
 	defer os.RemoveAll(dir)
 	defer srv.Shutdown()
-	defer client.Close()
+	defer codec.Close()
 
 	opt := structs.DCSpecificRequest{
 		Datacenter:   "dc1",
 		QueryOptions: structs.QueryOptions{Token: token},
 	}
 	reply := structs.IndexedServices{}
-	if err := client.Call("Catalog.ListServices", &opt, &reply); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ListServices", &opt, &reply); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 	if _, ok := reply.Services["foo"]; !ok {
@@ -869,10 +901,10 @@ func TestCatalog_ListServices_FilterACL(t *testing.T) {
 }
 
 func TestCatalog_ServiceNodes_FilterACL(t *testing.T) {
-	dir, token, srv, client := testACLFilterServer(t)
+	dir, token, srv, codec := testACLFilterServer(t)
 	defer os.RemoveAll(dir)
 	defer srv.Shutdown()
-	defer client.Close()
+	defer codec.Close()
 
 	opt := structs.ServiceSpecificRequest{
 		Datacenter:   "dc1",
@@ -880,7 +912,7 @@ func TestCatalog_ServiceNodes_FilterACL(t *testing.T) {
 		QueryOptions: structs.QueryOptions{Token: token},
 	}
 	reply := structs.IndexedServiceNodes{}
-	if err := client.Call("Catalog.ServiceNodes", &opt, &reply); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ServiceNodes", &opt, &reply); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 	found := false
@@ -901,7 +933,7 @@ func TestCatalog_ServiceNodes_FilterACL(t *testing.T) {
 		QueryOptions: structs.QueryOptions{Token: token},
 	}
 	reply = structs.IndexedServiceNodes{}
-	if err := client.Call("Catalog.ServiceNodes", &opt, &reply); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.ServiceNodes", &opt, &reply); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 	for _, sn := range reply.ServiceNodes {
@@ -912,10 +944,10 @@ func TestCatalog_ServiceNodes_FilterACL(t *testing.T) {
 }
 
 func TestCatalog_NodeServices_FilterACL(t *testing.T) {
-	dir, token, srv, client := testACLFilterServer(t)
+	dir, token, srv, codec := testACLFilterServer(t)
 	defer os.RemoveAll(dir)
 	defer srv.Shutdown()
-	defer client.Close()
+	defer codec.Close()
 
 	opt := structs.NodeSpecificRequest{
 		Datacenter:   "dc1",
@@ -923,7 +955,7 @@ func TestCatalog_NodeServices_FilterACL(t *testing.T) {
 		QueryOptions: structs.QueryOptions{Token: token},
 	}
 	reply := structs.IndexedNodeServices{}
-	if err := client.Call("Catalog.NodeServices", &opt, &reply); err != nil {
+	if err := msgpackrpc.CallWithCodec(codec, "Catalog.NodeServices", &opt, &reply); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 	found := false

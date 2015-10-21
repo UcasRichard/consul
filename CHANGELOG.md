@@ -9,15 +9,26 @@ BUG FIXES:
 * Allow services with `/` characters in the UI [GH-988]
 * Token hiding in HTTP logs bug fixed [GH-1020]
 * RFC6598 addresses are accepted as private IP's [GH-1050]
+* Tokens passed from the CLI or API work for maint mode [GH-1230]
 
 IMPROVEMENTS:
 
 * Advertised gossip/rpc addresses can now be configured [GH-1004]
+* Atlas integration options are reload-able via SIGHUP [GH-1199]
+* Atlas endpoint is a configurable option and CLI arg [GH-1201]
+* Switched to net-rpc-msgpackrpc to reduce RPC overhead [GH-1307]
 
 MISC:
 
-* Protocol version bumped to 3 for serf protocol 5 [GH-996]
 * Vagrantfile fixed for VMware [GH-1042]
+* Data migrator utility removed to reduce cgo dependency. [GH-1309]
+
+UPGRADE NOTES:
+
+* Consul will refuse to start if the data directory contains an "mdb" folder.
+  This folder was used in versions of Consul up to 0.5.1. Consul version 0.5.2
+  included a baked-in utility to automatically upgrade the data format, but
+  this has been removed in Consul 0.6 to reduce the dependency on cgo.
 
 ## 0.5.2 (May 18, 2015)
 
@@ -65,12 +76,12 @@ IMPROVEMENTS:
  * HTTP health checks more reliable, avoid KeepAlives [GH-824]
  * Improved protection against a passive cluster merge
  * SIGTERM is properly handled for graceful shutdown [GH-827]
- * Better staggering of defered updates to checks [GH-884]
+ * Better staggering of deferred updates to checks [GH-884]
  * Configurable stats prefix [GH-902]
  * Raft uses BoltDB as the backend store. [GH-857]
  * API RenewPeriodic more resilient to transient errors [GH-912]
 
-## 0.5.0 (Febuary 19, 2015)
+## 0.5.0 (February 19, 2015)
 
 FEATURES:
 
@@ -114,7 +125,7 @@ BUG FIXES:
  * Fixed issue preventing node reaping [GH-371]
  * Fixed gossip stability at very large scale
  * Fixed string of rpc error: rpc error: ... no known leader. [GH-611]
- * Fixed panic in `exec` during cancelation
+ * Fixed panic in `exec` during cancellation
  * Fixed health check state reset caused by SIGHUP [GH-693]
  * Fixed bug in UI when multiple datacenters exist.
 
@@ -124,8 +135,8 @@ IMPROVEMENTS:
  * Improved K/V blocking query performance [GH-578]
  * CLI respects CONSUL_RPC_ADDR environment variable to load parameter [GH-542]
  * Added support for multiple DNS recursors [GH-448]
- * Added support for definining multiple services per configuration file [GH-433]
- * Added support for definining multiple checks per configuration file [GH-433]
+ * Added support for defining multiple services per configuration file [GH-433]
+ * Added support for defining multiple checks per configuration file [GH-433]
  * Allow mixing of service and check definitions in a configuration file [GH-433]
  * Allow notes for checks in service definition file [GH-449]
  * Random stagger for agent checks to prevent thundering herd [GH-546]
@@ -334,7 +345,7 @@ IMPROVEMENTS:
 
 BUG FIXES:
 
-  * Renaming "seperator" to "separator". This is the correct spelling,
+  * Renaming "separator" to "separator". This is the correct spelling,
       but both spellings are respected for backwards compatibility. [GH-101]
   * Private IP is properly found on Windows clients.
   * Windows agents won't show "failed to decode" errors on every RPC

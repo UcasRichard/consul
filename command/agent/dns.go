@@ -223,7 +223,7 @@ func (d *DNSServer) handlePtr(resp dns.ResponseWriter, req *dns.Msg) {
 	}
 }
 
-// handleQUery is used to handle DNS queries in the configured domain
+// handleQuery is used to handle DNS queries in the configured domain
 func (d *DNSServer) handleQuery(resp dns.ResponseWriter, req *dns.Msg) {
 	q := req.Question[0]
 	defer func(s time.Time) {
@@ -352,9 +352,9 @@ INVALID:
 
 // nodeLookup is used to handle a node query
 func (d *DNSServer) nodeLookup(network, datacenter, node string, req, resp *dns.Msg) {
-	// Only handle ANY and A type requests
+	// Only handle ANY, A and AAAA type requests
 	qType := req.Question[0].Qtype
-	if qType != dns.TypeANY && qType != dns.TypeA {
+	if qType != dns.TypeANY && qType != dns.TypeA && qType != dns.TypeAAAA {
 		return
 	}
 
@@ -390,7 +390,7 @@ RPC:
 	}
 
 	// Add the node record
-	records := d.formatNodeRecord(&out.NodeServices.Node, out.NodeServices.Node.Address,
+	records := d.formatNodeRecord(out.NodeServices.Node, out.NodeServices.Node.Address,
 		req.Question[0].Name, qType, d.config.NodeTTL)
 	if records != nil {
 		resp.Answer = append(resp.Answer, records...)
@@ -511,9 +511,17 @@ RPC:
 	// Perform a random shuffle
 	shuffleServiceNodes(out.Nodes)
 
+	// Add various responses depending on the request
+	qType := req.Question[0].Qtype
+	d.serviceNodeRecords(out.Nodes, req, resp, ttl)
+
+	if qType == dns.TypeSRV {
+		d.serviceSRVRecords(datacenter, out.Nodes, req, resp, ttl)
+	}
+
 	// If the network is not TCP, restrict the number of responses
-	if network != "tcp" && len(out.Nodes) > maxServiceResponses {
-		out.Nodes = out.Nodes[:maxServiceResponses]
+	if network != "tcp" && len(resp.Answer) > maxServiceResponses {
+		resp.Answer = resp.Answer[:maxServiceResponses]
 
 		// Flag that there are more records to return in the UDP response
 		if d.config.EnableTruncate {
@@ -521,12 +529,10 @@ RPC:
 		}
 	}
 
-	// Add various responses depending on the request
-	qType := req.Question[0].Qtype
-	d.serviceNodeRecords(out.Nodes, req, resp, ttl)
-
-	if qType == dns.TypeSRV {
-		d.serviceSRVRecords(datacenter, out.Nodes, req, resp, ttl)
+	// If the answer is empty, return not found
+	if len(resp.Answer) == 0 {
+		d.addSOA(d.domain, resp)
+		return
 	}
 }
 
@@ -579,7 +585,7 @@ func (d *DNSServer) serviceNodeRecords(nodes structs.CheckServiceNodes, req, res
 		handled[addr] = struct{}{}
 
 		// Add the node record
-		records := d.formatNodeRecord(&node.Node, addr, qName, qType, ttl)
+		records := d.formatNodeRecord(node.Node, addr, qName, qType, ttl)
 		if records != nil {
 			resp.Answer = append(resp.Answer, records...)
 		}
@@ -620,7 +626,7 @@ func (d *DNSServer) serviceSRVRecords(dc string, nodes structs.CheckServiceNodes
 		}
 
 		// Add the extra record
-		records := d.formatNodeRecord(&node.Node, addr, srvRec.Target, dns.TypeANY, ttl)
+		records := d.formatNodeRecord(node.Node, addr, srvRec.Target, dns.TypeANY, ttl)
 		if records != nil {
 			resp.Extra = append(resp.Extra, records...)
 		}
